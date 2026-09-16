@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- 점심자율학습 출석부 v1.0 — 명단/좌석 관리, 입퇴실 체크, 일부/전체 초기화, 입실기록 자동 전송 -->
+<!-- 점심자율학습 출석부 v1.0 — 명단/좌석 관리, 입퇴실 체크, 일부/전체 초기화, 입실기록 자동 전송(메일), 출석기록 자동 저장(구글시트) -->
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -396,21 +396,51 @@
       </div>
 
       <details class="mail-gas-box">
-        <summary>완전 자동 전송 연결하기(구글 앱스 스크립트, 선택사항)</summary>
+        <summary>완전 자동 전송/저장 연결하기(구글 앱스 스크립트, 선택사항)</summary>
         <p class="hint" style="margin-top:8px;">
           GAS 웹앱 URL을 입력하지 않으면, 설정한 시간에 메일 작성창만 자동으로 열리고 실제 전송은 직접 눌러야 합니다.<br>
-          아래 스크립트를 구글 앱스 스크립트 편집기에 붙여넣고 "배포 → 웹 앱으로 배포"(액세스 권한: 모든 사용자)한 뒤, 발급된 URL을 아래에 입력하면 탭이 열려 있을 때 완전히 자동으로 전송됩니다.
+          아래 스크립트 하나로 <b>메일 자동 전송</b>과 <b>구글시트 자동 저장</b>(5번 항목)을 모두 처리합니다. 구글시트에 저장하려면, 반드시 저장할 <b>구글시트 파일 안에서</b> "확장 프로그램 → Apps Script"로 스크립트를 만들어야 합니다(그래야 스크립트가 그 시트를 찾을 수 있어요). 메일만 쓸 경우엔 아무 곳에서나 새 프로젝트로 만들어도 됩니다.<br>
+          작성 후 "배포 → 새 배포 → 웹 앱"(실행 대상: 나, 액세스 권한: 모든 사용자)으로 배포하고, 발급된 URL을 아래와 5번 항목에 입력하세요.
         </p>
         <div class="row">
           GAS 웹앱 URL <input type="text" id="mail-gas-url" class="text-field" placeholder="https://script.google.com/macros/s/.../exec" style="flex:1; min-width:240px;">
         </div>
         <pre id="gas-snippet">function doPost(e) {
   var data = JSON.parse(e.postData.contents);
-  GmailApp.sendEmail(data.to, data.subject, data.body);
+  if (data.type === 'saveAttendance') {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(data.sheetName) || ss.insertSheet(data.sheetName);
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow(['날짜', '좌석', '이름', '상태', '입실시간', '퇴실시간']);
+    }
+    data.rows.forEach(function(row){ sheet.appendRow(row); });
+  } else {
+    GmailApp.sendEmail(data.to, data.subject, data.body);
+  }
   return ContentService.createTextOutput('OK');
 }</pre>
         <button class="btn ghost" id="copy-gas-btn">스크립트 복사</button>
       </details>
+    </div>
+
+    <div class="panel">
+      <h2><span class="step">5</span>출석기록 자동 저장 (구글시트)</h2>
+      <p class="hint">설정한 시간에 그 시점의 출석 기록을 구글시트에 한 줄씩 자동으로 추가합니다. 위 4번 항목의 GAS 웹앱과 같은 스크립트를 사용합니다. 저장이 이뤄지려면 이 페이지(브라우저 탭)가 열려 있어야 합니다.</p>
+      <div class="row">
+        <label class="checkline"><input type="checkbox" id="sheet-enabled">자동 저장 사용</label>
+        저장 시간 <input type="time" id="sheet-time" value="12:50">
+      </div>
+      <div class="row">
+        시트 이름 <input type="text" id="sheet-name" class="text-field" placeholder="출석기록" style="width:180px;">
+      </div>
+      <div class="row">
+        GAS 웹앱 URL(선택) <input type="text" id="sheet-gas-url" class="text-field" placeholder="비워두면 위 4번의 URL을 그대로 사용합니다" style="flex:1; min-width:240px;">
+      </div>
+      <div class="row">
+        <button class="btn" id="sheet-save-btn">저장 설정 저장</button>
+        <button class="btn ghost" id="sheet-test-btn">지금 테스트 저장</button>
+        <span class="hint" id="sheet-status" style="margin:0;"></span>
+      </div>
     </div>
   </section>
 </main>
@@ -449,6 +479,8 @@
   const LOG_PREFIX = "lsa_log_";
   const LS_MAILCFG = "lsa_mailcfg";
   const LS_LAST_SENT = "lsa_last_sent";
+  const LS_SHEETCFG = "lsa_sheetcfg";
+  const LS_LAST_SHEET_SAVE = "lsa_last_sheet_save";
 
   function uid(){ return 's_' + Math.random().toString(36).slice(2,10); }
   function todayKey(){
@@ -585,7 +617,113 @@
     if(last && last.date === todayKey()) return;
     sendReport(false);
   }
-  setInterval(checkAutoSend, 20000);
+
+  // ---------------- Auto save to Google Sheet ----------------
+  function loadSheetCfg(){
+    return load(LS_SHEETCFG, {enabled:false, time:'12:50', sheetName:'출석기록', gasUrl:''});
+  }
+  function saveSheetCfg(cfg){ save(LS_SHEETCFG, cfg); }
+  function resolveSheetGasUrl(cfg){
+    if(cfg.gasUrl) return cfg.gasUrl;
+    return loadMailCfg().gasUrl || '';
+  }
+
+  function buildAttendanceRows(){
+    const log = todayLog();
+    const rows = [];
+    seats.forEach((sid, idx) => {
+      if(!sid) return;
+      const stu = studentById(sid);
+      if(!stu) return;
+      const rec = log[sid];
+      const status = (!rec || !rec.checkin) ? '미입실' : (rec.checkout ? '퇴실완료' : '입실중');
+      rows.push([
+        todayKey(), idx+1, stu.name, status,
+        rec && rec.checkin ? fmtTime(rec.checkin) : '',
+        rec && rec.checkout ? fmtTime(rec.checkout) : ''
+      ]);
+    });
+    return rows;
+  }
+
+  function renderSheetStatus(){
+    const last = load(LS_LAST_SHEET_SAVE, null);
+    document.getElementById('sheet-status').textContent = last ? `마지막 저장: ${last.date} ${last.time}` : '저장 기록 없음';
+  }
+
+  function renderSheetSettings(){
+    const cfg = loadSheetCfg();
+    document.getElementById('sheet-enabled').checked = !!cfg.enabled;
+    document.getElementById('sheet-time').value = cfg.time || '12:50';
+    document.getElementById('sheet-name').value = cfg.sheetName || '출석기록';
+    document.getElementById('sheet-gas-url').value = cfg.gasUrl || '';
+    renderSheetStatus();
+  }
+
+  function markSheetSaved(){
+    save(LS_LAST_SHEET_SAVE, {date: todayKey(), time: fmtTime(Date.now())});
+    renderSheetStatus();
+  }
+
+  function sendToSheet(isTest){
+    const cfg = loadSheetCfg();
+    const url = resolveSheetGasUrl(cfg);
+    if(!url){ toast('구글시트 저장용 GAS 웹앱 URL을 먼저 설정하세요'); return; }
+    const rows = buildAttendanceRows();
+    if(!rows.length){ toast('저장할 좌석/학생이 없습니다'); return; }
+    fetch(url, {
+      method:'POST',
+      mode:'no-cors',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({type:'saveAttendance', sheetName: cfg.sheetName || '출석기록', rows})
+    }).then(() => {
+      toast((isTest ? '테스트 ' : '') + '구글시트 저장 요청을 보냈습니다');
+      markSheetSaved();
+    }).catch(() => {
+      toast('저장 중 오류가 발생했습니다. GAS URL을 확인하세요');
+    });
+  }
+
+  function checkAutoSheetSave(){
+    const cfg = loadSheetCfg();
+    if(!cfg.enabled || !cfg.time) return;
+    const url = resolveSheetGasUrl(cfg);
+    if(!url) return;
+    const now = new Date();
+    const current = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
+    if(current !== cfg.time) return;
+    const last = load(LS_LAST_SHEET_SAVE, null);
+    if(last && last.date === todayKey()) return;
+    sendToSheet(false);
+  }
+
+  function checkAutoTasks(){
+    checkAutoSend();
+    checkAutoSheetSave();
+  }
+  setInterval(checkAutoTasks, 20000);
+
+  document.getElementById('sheet-save-btn').addEventListener('click', () => {
+    const cfg = {
+      enabled: document.getElementById('sheet-enabled').checked,
+      time: document.getElementById('sheet-time').value || '12:50',
+      sheetName: document.getElementById('sheet-name').value.trim() || '출석기록',
+      gasUrl: document.getElementById('sheet-gas-url').value.trim()
+    };
+    saveSheetCfg(cfg);
+    toast('저장 설정이 저장되었습니다');
+  });
+
+  document.getElementById('sheet-test-btn').addEventListener('click', () => {
+    const cfg = {
+      enabled: document.getElementById('sheet-enabled').checked,
+      time: document.getElementById('sheet-time').value || '12:50',
+      sheetName: document.getElementById('sheet-name').value.trim() || '출석기록',
+      gasUrl: document.getElementById('sheet-gas-url').value.trim()
+    };
+    saveSheetCfg(cfg);
+    sendToSheet(true);
+  });
 
   document.getElementById('mail-save-btn').addEventListener('click', () => {
     const cfg = {
@@ -957,7 +1095,7 @@
   setupBtn.addEventListener('click', () => {
     setupBtn.classList.add('active'); boardBtn.classList.remove('active');
     setupView.classList.add('active'); boardView.classList.remove('active');
-    renderRosterList(); renderSeatEditor(); renderRosterCount(); renderMailSettings();
+    renderRosterList(); renderSeatEditor(); renderRosterCount(); renderMailSettings(); renderSheetSettings();
   });
 
   // ---------------- Log drawer ----------------
@@ -1033,6 +1171,7 @@
   document.getElementById('cols-input').value = layout.cols;
   renderAll();
   renderMailSettings();
+  renderSheetSettings();
 })();
 </script>
 </body>
